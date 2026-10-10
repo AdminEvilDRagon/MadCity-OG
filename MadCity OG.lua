@@ -31,7 +31,7 @@ end
 
 Notify("<Color=Yellow>MadHaax OG Loaded succesfully, enjoy!<Color=/>\nMade by <Color=Red> EvilDragon & <Color=Blue> Kenny", 3)
 task.wait(2)
-Notify("<Color=White>You can Toggle the UI with LeftAlt", 2)
+Notify("<Color=White>You can Toggle the UI with RightAlt", 2)
 
 ---------------------------------------------------------
 -- VEHICLE TELEPORT LOGIC (FIXED HEIST CLIPPING)
