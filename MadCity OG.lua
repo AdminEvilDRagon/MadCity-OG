@@ -31,30 +31,57 @@ end
 
 Notify("<Color=Yellow>MadHaax OG Loaded succesfully, enjoy!<Color=/>\nMade by <Color=Red> EvilDragon & <Color=Blue> Kenny", 3)
 task.wait(2)
-Notify("<Color=White>You can Toggle the UI with RightAlt", 2)
+Notify("<Color=White>You can Toggle the UI with RightAlt", 1.5)
+
+---------------------------------------------------------
+-- VELOCITY RESET SYSTEM (NEW)
+---------------------------------------------------------
+local velocityLockActive = false
+local velocityLockConn = nil
+
+local function startVelocityLock(duration)
+    duration = duration or 0.5
+    velocityLockActive = true
+
+    if velocityLockConn then
+        velocityLockConn:Disconnect()
+        velocityLockConn = nil
+    end
+
+    local startTime = tick()
+    velocityLockConn = RunService.Heartbeat:Connect(function()
+        if not velocityLockActive then return end
+        if tick() - startTime > duration then
+            velocityLockActive = false
+            if velocityLockConn then
+                velocityLockConn:Disconnect()
+                velocityLockConn = nil
+            end
+            return
+        end
+
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            hrp.Velocity = Vector3.zero
+            hrp.RotVelocity = Vector3.zero
+        end
+    end)
+end
+
+local function stopVelocityLock()
+    velocityLockActive = false
+    if velocityLockConn then
+        velocityLockConn:Disconnect()
+        velocityLockConn = nil
+    end
+end
 
 ---------------------------------------------------------
 -- VEHICLE TELEPORT LOGIC (FIXED HEIST CLIPPING)
 ---------------------------------------------------------
-local SPAWN_SPAM_POS = Vector3.new(632.65, 437.56, 514.56)
-
-local function getPlayerVehicle()
-    local objectSelection = Workspace:FindFirstChild("ObjectSelection")
-    if objectSelection then
-        for _, model in ipairs(objectSelection:GetChildren()) do
-            local vehicleOwner = model:FindFirstChild("VehicleOwner")
-            if vehicleOwner then
-                local ownerValue = vehicleOwner.Value
-                if (typeof(ownerValue) == "Instance" and ownerValue == LocalPlayer) 
-                or (tostring(ownerValue) == LocalPlayer.Name) then
-                    return model
-                end
-            end
-        end
-    end
-    return nil
-end
-
 local function executeVehicleDriveAndTeleport(vehicle, targetCFrame)
     local character = LocalPlayer.Character
     local humanoid = character and character:FindFirstChild("Humanoid")
@@ -85,23 +112,27 @@ local function executeVehicleDriveAndTeleport(vehicle, targetCFrame)
         if humanoid.SeatPart == seat then
             task.wait(0.5) 
 
-            -- Fix: Setzt das Auto sicher über den Boden (World Space)
             local safeTargetCFrame = targetCFrame + Vector3.new(0, 5, 0)
             vehicle:PivotTo(safeTargetCFrame)
             hrp.CFrame = safeTargetCFrame + Vector3.new(0, 2, 0)
 
-            -- Schwung auf 0 setzen, damit es nicht durch den Heist-Boden fällt!
+            startVelocityLock(0.8)
+
             if vehicle.PrimaryPart then
                 vehicle.PrimaryPart.Velocity = Vector3.new(0, 0, 0)
                 vehicle.PrimaryPart.RotVelocity = Vector3.new(0, 0, 0)
+                vehicle.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
+                vehicle.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
             end
 
-            task.wait(0.4) -- Kurz auf dem Boden stabilisieren lassen
+            task.wait(0.4) 
             humanoid.Sit = false
 
-            task.wait(0.1)
+            task.wait(0.15) 
             local exitPos = safeTargetCFrame.Position + Vector3.new(0, 3, 0)
             character:PivotTo(CFrame.new(exitPos))
+
+            startVelocityLock(0.6)
         else
             Notify("<Color=Red>Fehler:</Color> Konnte nicht ins Auto einsteigen!", 2)
         end
@@ -110,66 +141,298 @@ local function executeVehicleDriveAndTeleport(vehicle, targetCFrame)
     end
 end
 
-local function vehicleTeleport(targetCFrame)
-    local character = LocalPlayer.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    local existingVehicle = getPlayerVehicle()
-
-    if existingVehicle then
-        executeVehicleDriveAndTeleport(existingVehicle, targetCFrame)
-    else
-        local originalCFrame = hrp.CFrame
-        hrp.CFrame = CFrame.new(SPAWN_SPAM_POS)
-        
-        local startTime = tick()
-        local spawnedVehicle = nil
-        local lastSpawnAttempt = 0
-
-        while tick() - startTime < 10 do
-            hrp.CFrame = CFrame.new(SPAWN_SPAM_POS)
-
-            if tick() - lastSpawnAttempt > 1.5 then
-                gameEvent:FireServer("SpawnVehicle", "Camaro")
-                lastSpawnAttempt = tick()
-            end
-
-            spawnedVehicle = getPlayerVehicle()
-            if spawnedVehicle then
-                break
-            end
-
-            task.wait(0.1)
-        end
-
-        if not spawnedVehicle then
-            hrp.CFrame = originalCFrame
-            Notify("<Color=Red>Vehicle Teleport failed!</Color>", 2)
-            return
-        end
-
-        task.wait(0.5)
-        executeVehicleDriveAndTeleport(spawnedVehicle, targetCFrame)
-    end
-end
-
 ---------------------------------------------------------
--- WEAPON GIVER LOGIC
+-- WEAPON GIVER LOGIC (Standard Seat Persist)
 ---------------------------------------------------------
 local MAX_RUNTIME = 5.0
 local EVENT_SPAM_DELAY = 0.05
-local TELEPORT_DELAY = 0.001
 local wgRunning = false
 
-local function getCharacter()
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local hrp = char:WaitForChild("HumanoidRootPart")
-    return char, hrp
+local S = {
+    armed = false,
+    lastSeat = nil,
+    conn = nil,
+    holding = false,
+    standTrack = nil,
+    standApplied = false,
+}
+
+local VEHICLE_CHASSIS_NAMES = {
+    CarChassis = true, HelicopterChassis = true, BoatChassis = true,
+    BikeChassis = true, PlaneChassis = true, MechChassis = true,
+    JetChassis = true, JetskiChassis = true,
+}
+
+local function isVehicleModel(model)
+    if not model then return end
+    for name in pairs(VEHICLE_CHASSIS_NAMES) do
+        if model:FindFirstChild(name) then return true end
+    end
+    if model:FindFirstChild("Chassis") then return true end
+    if model:FindFirstChild("FrontLeftWheel") then return true end
+    if model:FindFirstChild("Thruster") then return true end
+    if model:FindFirstChild("Rotor") then return true end
+    if model:FindFirstChild("Propeller") then return true end
+    return false
 end
 
-local function claimOwnership(hrp)
-    pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+local function isRealSeat(sp)
+    if not sp then return false end
+    if not (sp:IsA("VehicleSeat") or sp:IsA("Seat")) then return false end
+    local model = sp
+    while model and not model:IsA("Model") do model = model.Parent end
+    return isVehicleModel(model)
+end
+
+local SEAT_NAMES = {
+    DriveSeat = true, DriverSeat = true, PilotSeat = true,
+    MechSeat = true, HeliSeat = true, PlaneSeat = true,
+    BoatSeat = true, BikeSeat = true, JetSeat = true,
+}
+
+local EXCLUDED_SEAT_NAMES = {
+    PassengerSeat = true, Passenger = true, Seat = true,
+    BackSeat = true, RearSeat = true, GunnerSeat = true,
+}
+
+local function isSwatVehicle(vehicleModel)
+    if not vehicleModel then return false end
+    local settings = vehicleModel:FindFirstChild("Settings")
+    if not settings or not settings:IsA("ModuleScript") then return false end
+
+    local ok, src = pcall(function()
+        if getsource then return getsource(settings) end
+        if getscriptbytecode then return getscriptbytecode(settings) end
+        return settings.Source
+    end)
+    if ok and type(src) == "string" and src:find("SWAT") then
+        return true
+    end
+    return false
+end
+
+local function getClosestDriveSeat(character)
+    local objectSelection = Workspace:WaitForChild("ObjectSelection", 10)
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not objectSelection then return nil end
+
+    local candidates = {}
+    local function scanFolder(parent)
+        for _, child in ipairs(parent:GetChildren()) do
+            local isSeat = child:IsA("VehicleSeat") or child:IsA("Seat")
+            if isSeat and SEAT_NAMES[child.Name] and not EXCLUDED_SEAT_NAMES[child.Name] then
+                if not child.Occupant then
+                    local distance = (hrp.Position - child.Position).Magnitude
+                    local model = child
+                    while model and not model:IsA("Model") do model = model.Parent end
+                    table.insert(candidates, {seat = child, dist = distance, model = model})
+                end
+            end
+            if child:IsA("Folder") or child:IsA("Model") then
+                scanFolder(child)
+            end
+        end
+    end
+    scanFolder(objectSelection)
+
+    table.sort(candidates, function(a, b) return a.dist < b.dist end)
+    for _, c in ipairs(candidates) do
+        if not isSwatVehicle(c.model) then
+            return c.seat, c.dist
+        end
+    end
+    return nil
+end
+
+local function killSeatWelds()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, c in ipairs(char:GetChildren()) do
+        if c:IsA("Weld") or c:IsA("Motor6D") or c:IsA("WeldConstraint") then
+            local p1 = c.Part1
+            if p1 and (p1:IsA("VehicleSeat") or p1:IsA("Seat")) then
+                pcall(function() c.Enabled = false end)
+            end
+        end
+    end
+    if S.lastSeat then
+        local sw = S.lastSeat:FindFirstChild("SeatWeld")
+        if sw then pcall(function() sw.Enabled = false end) end
+    end
+end
+
+local STAND_ANIM_R15 = "rbxassetid://507766666"
+local STAND_ANIM_R6  = "rbxassetid://180435571"
+
+local function applyVisualStand()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if not animator then return end
+
+    killSeatWelds()
+
+    if S.standTrack and S.standTrack.IsPlaying and S.standApplied then return end
+
+    for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+        if track.Name ~= "__queStand" then
+            pcall(function() track:Stop(0) end)
+        end
+    end
+
+    local rigType = hum.RigType
+    local id = (rigType == Enum.HumanoidRigType.R6) and STAND_ANIM_R6 or STAND_ANIM_R15
+
+    local existing = animator:FindFirstChild("__queStandAnim")
+    if existing then existing:Destroy() end
+
+    local anim = Instance.new("Animation")
+    anim.Name = "__queStandAnim"
+    anim.AnimationId = id
+    anim.Parent = animator
+
+    local track = animator:LoadAnimation(anim)
+    track.Name = "__queStand"
+    track.Priority = Enum.AnimationPriority.Action4
+    track.Looped = false
+    track:Play(0)
+
+    task.defer(function()
+        pcall(function() track:AdjustSpeed(0) end)
+    end)
+
+    S.standTrack = track
+    S.standApplied = true
+end
+
+local function clearVisualStand()
+    S.standApplied = false
+    if S.standTrack then
+        pcall(function() S.standTrack:Stop(0) end)
+        S.standTrack = nil
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if animator then
+        local anim = animator:FindFirstChild("__queStandAnim")
+        if anim then anim:Destroy() end
+    end
+end
+
+local function uprightRoot()
+    local char = LocalPlayer.Character
+    local root = char and (char.PrimaryPart or char:FindFirstChild("HumanoidRootPart"))
+    if not root then return end
+    local pos = root.Position
+    local cur = root.CFrame
+    local lookFlat = Vector3.new(cur.LookVector.X, 0, cur.LookVector.Z)
+    if lookFlat.Magnitude < 0.01 then lookFlat = Vector3.new(0, 0, -1) end
+    root.CFrame = CFrame.lookAt(pos, pos + lookFlat.Unit)
+end
+
+local function startFlagLoop()
+    if S.conn then S.conn:Disconnect() S.conn = nil end
+    S.armed = false
+    S.lastSeat = nil
+    S.holding = false
+    S.standTrack = nil
+    S.standApplied = false
+
+    S.conn = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        local hum = char and char:WaitForChild("Humanoid", 0.1)
+        if not hum then return end
+
+        local sp = hum.SeatPart
+        if isRealSeat(sp) and hum.Sit then
+            S.lastSeat = sp
+            S.armed = true
+        end
+
+        if not S.armed then return end
+
+        if not S.lastSeat or not S.lastSeat.Parent then
+            S.lastSeat = nil
+            S.armed = false
+            S.holding = false
+            clearVisualStand()
+            return
+        end
+
+        if hum.Sit == false then
+            hum.Sit = true
+            pcall(function() S.lastSeat:Sit(hum) end)
+        end
+
+        if hum:GetState() ~= Enum.HumanoidStateType.Seated then
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Seated) end)
+        end
+
+        if S.holding then
+            applyVisualStand()
+            uprightRoot()
+        end
+    end)
+end
+
+local function stopFlagLoop()
+    S.armed = false
+    S.lastSeat = nil
+    S.holding = false
+    clearVisualStand()
+    if S.conn then S.conn:Disconnect() S.conn = nil end
+end
+
+local function executeSeatPersistTeleport(targetPos)
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChild("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or not hum then return false end
+
+    local startPos = root.CFrame
+    S.holding = false
+    startFlagLoop()
+
+    local seat, dist = getClosestDriveSeat(char)
+    if not seat then
+        stopFlagLoop()
+        return false
+    end
+
+    pcall(function() seat:Sit(hum) end)
+
+    local t = 0
+    while hum.SeatPart ~= seat and t < 2 do
+        task.wait(0.1)
+        t = t + 0.1
+    end
+
+    if hum.SeatPart ~= seat then
+        stopFlagLoop()
+        return false
+    end
+
+    task.wait(0.5)
+    hum.Sit = false
+    pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+    task.wait(0.2) 
+
+    if startPos then
+        char:SetPrimaryPartCFrame(CFrame.new(targetPos))
+    end
+
+    startVelocityLock(0.6)
+    
+    task.wait(0.3)
+    stopFlagLoop()
+    hum.Sit = false
+    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+    
+    startVelocityLock(0.4)
+    return true
 end
 
 local function findNearestEvent(weaponName, playerPos)
@@ -226,12 +489,11 @@ local function selectWeapon(weaponName, targetCoords, itemName)
     if wgRunning then return end
     wgRunning = true
 
-    local char, hrp = getCharacter()
-    claimOwnership(hrp)
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then wgRunning = false return end
 
     local savedCFrame = hrp.CFrame
-    local targetCFrame = CFrame.new(targetCoords)
-
     task.wait(0.15)
 
     if hasItem(itemName) then
@@ -239,21 +501,14 @@ local function selectWeapon(weaponName, targetCoords, itemName)
         return
     end
 
+    local success = executeSeatPersistTeleport(targetCoords)
+    if not success then
+        hrp.CFrame = CFrame.new(targetCoords)
+        startVelocityLock(0.5)
+    end
+
     local stop = false
     local startTime = os.clock()
-
-    task.spawn(function()
-        while not stop do
-            if not hrp or not hrp.Parent then
-                local c = LocalPlayer.Character
-                if c then hrp = c:FindFirstChild("HumanoidRootPart") end
-            end
-            if hrp then
-                hrp.CFrame = targetCFrame
-            end
-            task.wait(TELEPORT_DELAY)
-        end
-    end)
 
     task.spawn(function()
         while not stop do
@@ -278,8 +533,13 @@ local function selectWeapon(weaponName, targetCoords, itemName)
     stop = true
     task.wait(0.1)
 
-    if hrp and hrp.Parent then
-        hrp.CFrame = savedCFrame
+    local backSuccess = executeSeatPersistTeleport(savedCFrame.Position)
+    if not backSuccess then
+        local currentHrP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if currentHrP then 
+            currentHrP.CFrame = savedCFrame 
+            startVelocityLock(0.5)
+        end
     end
 
     wgRunning = false
@@ -292,6 +552,8 @@ local mainTab = library:CreateWindow('Main')
 local modTab = library:CreateWindow('Modifications')
 local teleportTab = library:CreateWindow('Teleports')
 local miscTab = library:CreateWindow('Misc')
+local trollingTab = library:CreateWindow('Trolling')
+local farmingTab = library:CreateWindow('Farming')
 
 ---------------------------------------------------------
 -- TAB 1: MAIN (Player & Combat) 
@@ -377,35 +639,74 @@ mainTab:Slider('Fly Speed', {flag = "flyspeed", min = 1, max = 600, default = fl
     flySpeed = value
 end)
 
-local noclipEnabled = false
+---------------------------------------------------------
+-- NOCLIP
+---------------------------------------------------------
 local noclipControlEnabled = false
-local SteppedConnection
+local SteppedConnection = nil
+local noclipSavedSettings = {}
+
+local function collectCharacterParts()
+    local parts = {}
+    local character = LocalPlayer.Character
+    if character then
+        for _, part in pairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                parts[part] = true
+            end
+        end
+    end
+    return parts
+end
 
 local function disableNoclip()
     if SteppedConnection then
         SteppedConnection:Disconnect()
         SteppedConnection = nil
     end
-    for _, child in pairs(Workspace:GetChildren()) do
-        if child.Name == LocalPlayer.Name then
-            for _, part in pairs(child:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = true
-                end
-            end
+
+    for part, state in pairs(noclipSavedSettings) do
+        if part and part.Parent then
+            pcall(function()
+                part.CanCollide = state.CanCollide
+                part.CanTouch = state.CanTouch
+            end)
         end
     end
+    noclipSavedSettings = {}
 end
 
 local function enableNoclip()
+    if SteppedConnection then
+        SteppedConnection:Disconnect()
+        SteppedConnection = nil
+    end
+    noclipSavedSettings = {}
+
+    local function saveAndDisable(part)
+        if not noclipSavedSettings[part] then
+            noclipSavedSettings[part] = {
+                CanCollide = part.CanCollide,
+                CanTouch = part.CanTouch,
+            }
+        end
+        part.CanCollide = false
+    end
+
     SteppedConnection = RunService.Stepped:Connect(function()
-        for _, child in pairs(Workspace:GetChildren()) do
-            if child.Name == LocalPlayer.Name then
-                for _, part in pairs(child:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        part.CanCollide = false
-                    end
-                end
+        local currentParts = collectCharacterParts()
+
+        for part in pairs(currentParts) do
+            if not noclipSavedSettings[part] then
+                saveAndDisable(part)
+            elseif part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+
+        for part in pairs(noclipSavedSettings) do
+            if not part.Parent or not currentParts[part] then
+                noclipSavedSettings[part] = nil
             end
         end
     end)
@@ -413,9 +714,339 @@ end
 
 mainTab:Toggle("Noclip [N]", {flag = "noclip"}, function(state)
     noclipControlEnabled = state 
-    if not state then
-        noclipEnabled = false
+    if state then
+        enableNoclip()
+    else
         disableNoclip()
+    end
+end)
+---------------------------------------------------------
+-- Fly+Noclip+Semi Invis Bypassed (Keybind G)
+---------------------------------------------------------
+local bypassActive = false
+local bypassControlEnabled = false
+local bypassRunning = false
+local bypassArmed = false
+local bypassLastSeat = nil
+local bypassConn = nil
+local bypassFlyConn = nil
+local bypassNoclipConn = nil
+local bypassBv = nil
+local bypassFlying = false
+local bypassNoclipState = false
+local bypassSavedCollide = nil
+local bypassHolding = false
+local bypassStandTrack = nil
+local bypassStandApplied = false
+
+local function bypassKillSeatWelds()
+    local charModel = LocalPlayer.Character
+    if not charModel then return end
+    for _, c in ipairs(charModel:GetChildren()) do
+        if c:IsA("Weld") or c:IsA("Motor6D") or c:IsA("WeldConstraint") then
+            local p1 = c.Part1
+            if p1 and (p1:IsA("VehicleSeat") or p1:IsA("Seat")) then
+                pcall(function() c.Enabled = false end)
+            end
+        end
+    end
+    if bypassLastSeat then
+        local sw = bypassLastSeat:FindFirstChild("SeatWeld")
+        if sw then pcall(function() sw.Enabled = false end) end
+    end
+end
+
+local function bypassRestoreSeatWelds()
+    local charModel = LocalPlayer.Character
+    if not charModel then return end
+    for _, c in ipairs(charModel:GetChildren()) do
+        if c:IsA("Weld") or c:IsA("Motor6D") or c:IsA("WeldConstraint") then
+            local p1 = c.Part1
+            if p1 and (p1:IsA("VehicleSeat") or p1:IsA("Seat")) then
+                pcall(function() c.Enabled = true end)
+            end
+        end
+    end
+    if bypassLastSeat then
+        local sw = bypassLastSeat:FindFirstChild("SeatWeld")
+        if sw then pcall(function() sw.Enabled = true end) end
+    end
+end
+
+local function bypassApplyVisualStand()
+    local charModel = LocalPlayer.Character
+    local hum = charModel and charModel:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if not animator then return end
+
+    bypassKillSeatWelds()
+    if bypassStandTrack and bypassStandTrack.IsPlaying and bypassStandApplied then return end
+
+    for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+        if track.Name ~= "__queStandBypass" then
+            pcall(function() track:Stop(0) end)
+        end
+    end
+
+    local rigType = hum.RigType
+    local id = (rigType == Enum.HumanoidRigType.R6) and "rbxassetid://180435571" or "rbxassetid://507766666"
+
+    local existing = animator:FindFirstChild("__queStandAnimBypass")
+    if existing then existing:Destroy() end
+
+    local anim = Instance.new("Animation")
+    anim.Name = "__queStandAnimBypass"
+    anim.AnimationId = id
+    anim.Parent = animator
+
+    local track = animator:LoadAnimation(anim)
+    track.Name = "__queStandBypass"
+    track.Priority = Enum.AnimationPriority.Action4
+    track.Looped = false
+    track:Play(0)
+
+    task.defer(function()
+        pcall(function() track:AdjustSpeed(0) end)
+    end)
+
+    bypassStandTrack = track
+    bypassStandApplied = true
+end
+
+local function bypassClearVisualStand()
+    bypassStandApplied = false
+    if bypassStandTrack then
+        pcall(function() bypassStandTrack:Stop(0) end)
+        bypassStandTrack = nil
+    end
+    local charModel = LocalPlayer.Character
+    local hum = charModel and charModel:FindFirstChildOfClass("Humanoid")
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if animator then
+        local anim = animator:FindFirstChild("__queStandAnimBypass")
+        if anim then anim:Destroy() end
+    end
+    bypassRestoreSeatWelds()
+end
+
+local function bypassUprightRoot()
+    local charModel = LocalPlayer.Character
+    local root = charModel and (charModel.PrimaryPart or charModel:FindFirstChild("HumanoidRootPart"))
+    if not root then return end
+    local pos = root.Position
+    local cur = root.CFrame
+    local lookFlat = Vector3.new(cur.LookVector.X, 0, cur.LookVector.Z)
+    if lookFlat.Magnitude < 0.01 then lookFlat = Vector3.new(0, 0, -1) end
+    root.CFrame = CFrame.lookAt(pos, pos + lookFlat.Unit)
+end
+
+local function startBypassFly()
+    if bypassFlying then return end
+    local charModel = LocalPlayer.Character
+    local root = charModel and (charModel.PrimaryPart or charModel:FindFirstChild("HumanoidRootPart"))
+    if not root then return end
+
+    bypassFlying = true
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = "__queFlyBypass"
+    bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    bv.Velocity = Vector3.zero
+    bv.Parent = root
+    bypassBv = bv
+
+    local current = Vector3.zero
+    bypassFlyConn = RunService.RenderStepped:Connect(function(dt)
+        if not bypassFlying or not bypassBv or not bypassBv.Parent then return end
+        local rootNow = charModel and (charModel.PrimaryPart or charModel:FindFirstChild("HumanoidRootPart"))
+        if not rootNow then return end
+
+        local spd = flySpeed
+        local dir = Vector3.zero
+        local look = Camera.CFrame.LookVector
+        local right = Camera.CFrame.RightVector
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + look end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - look end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0, 1, 0) end
+
+        local target = (dir.Magnitude > 0) and (dir.Unit * spd) or Vector3.zero
+        local a = math.clamp(dt * 12, 0, 1)
+        current = current:Lerp(target, a)
+
+        rootNow.AssemblyLinearVelocity = Vector3.zero
+        rootNow.Velocity = Vector3.zero
+        bypassBv.Velocity = current
+    end)
+end
+
+local function stopBypassFly()
+    bypassFlying = false
+    if bypassFlyConn then bypassFlyConn:Disconnect() bypassFlyConn = nil end
+    if bypassBv and bypassBv.Parent then bypassBv:Destroy() bypassBv = nil end
+end
+
+local function setBypassNoclip(on)
+    if on == bypassNoclipState then return end
+    bypassNoclipState = on
+    local charModel = LocalPlayer.Character
+
+    if on then
+        bypassSavedCollide = {}
+        if charModel then
+            for _, p in ipairs(charModel:GetDescendants()) do
+                if p:IsA("BasePart") then bypassSavedCollide[p] = p.CanCollide end
+            end
+        end
+        if bypassNoclipConn then bypassNoclipConn:Disconnect() bypassNoclipConn = nil end
+        bypassNoclipConn = RunService.Stepped:Connect(function()
+            if not bypassNoclipState then return end
+            local c = LocalPlayer.Character
+            if c then
+                for _, p in ipairs(c:GetDescendants()) do
+                    if p:IsA("BasePart") then
+                        if bypassSavedCollide[p] == nil then bypassSavedCollide[p] = p.CanCollide end
+                        p.CanCollide = false
+                    end
+                end
+            end
+        end)
+    else
+        if bypassNoclipConn then bypassNoclipConn:Disconnect() bypassNoclipConn = nil end
+        if charModel and bypassSavedCollide then
+            for part, val in pairs(bypassSavedCollide) do
+                if part and part.Parent then pcall(function() part.CanCollide = val end) end
+            end
+        end
+        bypassSavedCollide = nil
+    end
+end
+
+local function startBypassFlagLoop()
+    if bypassConn then bypassConn:Disconnect() bypassConn = nil end
+    bypassArmed = false
+    bypassLastSeat = nil
+    bypassHolding = false
+    bypassClearVisualStand()
+
+    bypassConn = RunService.Heartbeat:Connect(function()
+        local charModel = LocalPlayer.Character
+        local hum = charModel and charModel:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+
+        local sp = hum.SeatPart
+        if isRealSeat(sp) and hum.Sit then
+            bypassLastSeat = sp
+            bypassArmed = true
+        end
+
+        if not bypassArmed then return end
+        if not bypassLastSeat or not bypassLastSeat.Parent then
+            bypassLastSeat = nil
+            bypassArmed = false
+            bypassHolding = false
+            bypassClearVisualStand()
+            return
+        end
+
+        if hum.Sit == false then
+            hum.Sit = true
+            pcall(function() bypassLastSeat:Sit(hum) end)
+        end
+
+        if hum:GetState() ~= Enum.HumanoidStateType.Seated then
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Seated) end)
+        end
+
+        if bypassHolding then
+            bypassApplyVisualStand()
+            bypassUprightRoot()
+        end
+    end)
+end
+
+local function stopBypassFlagLoop()
+    bypassArmed = false
+    bypassLastSeat = nil
+    bypassHolding = false
+    bypassClearVisualStand()
+    if bypassConn then bypassConn:Disconnect() bypassConn = nil end
+end
+
+local function executeBypassStart()
+    if bypassRunning then return end
+    bypassRunning = true
+    task.spawn(function()
+        local charModel = LocalPlayer.Character
+        local hum = charModel and charModel:FindFirstChildOfClass("Humanoid")
+        local root = charModel and charModel:FindFirstChild("HumanoidRootPart")
+        if not (hum and root) then bypassRunning = false return end
+
+        local startPos = root.CFrame
+        bypassHolding = false
+        startBypassFlagLoop()
+
+        local seat, _ = getClosestDriveSeat(charModel)
+        if not seat then
+            stopBypassFlagLoop()
+            bypassRunning = false
+            return
+        end
+
+        pcall(function() seat:Sit(hum) end)
+        local t = 0
+        while hum.SeatPart ~= seat and t < 2 do
+            task.wait(0.1)
+            t = t + 0.1
+        end
+
+        if hum.SeatPart ~= seat then
+            stopBypassFlagLoop()
+            bypassRunning = false
+            return
+        end
+
+        task.wait(0.5)
+        hum.Sit = false
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        task.wait(0.2)
+
+        if startPos then
+            charModel:SetPrimaryPartCFrame(startPos)
+        end
+        task.wait(0.1)
+
+        bypassHolding = true
+        startBypassFly()
+        setBypassNoclip(true)
+        bypassRunning = false
+    end)
+end
+
+local function executeBypassStop()
+    bypassRunning = false
+    bypassHolding = false
+    stopBypassFlagLoop()
+    stopBypassFly()
+    setBypassNoclip(false)
+
+    local charModel = LocalPlayer.Character
+    local hum = charModel and charModel:FindFirstChildOfClass("Humanoid")
+    if hum then
+        if hum.Sit then
+            hum.Sit = false
+            task.wait(0.05)
+        end
+        hum.Jump = true
+    end
+end
+
+mainTab:Toggle("God Mode [G]", {flag = "fly_noclip_semi_invis_bypassed"}, function(state)
+    bypassControlEnabled = state
+    if not state then
+        executeBypassStop()
     end
 end)
 
@@ -435,6 +1066,14 @@ UserInputService.InputBegan:Connect(function(input, processed)
     if input.KeyCode == Enum.KeyCode.N and noclipControlEnabled then
         noclipEnabled = not noclipEnabled
         if noclipEnabled then enableNoclip() else disableNoclip() end
+    end
+
+    if input.KeyCode == Enum.KeyCode.G and bypassControlEnabled then
+        if not bypassHolding then
+            executeBypassStart()
+        else
+            executeBypassStop()
+        end
     end
 end)
 
@@ -548,7 +1187,6 @@ end
 Ammo1:GetPropertyChangedSignal("Text"):Connect(setInfinite)
 Ammo2:GetPropertyChangedSignal("Text"):Connect(setInfinite)
 
-
 --ESP
 mainTab:Section('--- Player ESP ---')
 
@@ -583,9 +1221,6 @@ local ESPSettings = {
 
 local ESP_Cache = {}
 local CoreGui = game:GetService("CoreGui")
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
 
 if CoreGui:FindFirstChild("MadCity_PlayerESP") then
     CoreGui.MadCity_PlayerESP:Destroy()
@@ -652,8 +1287,7 @@ Players.PlayerRemoving:Connect(removePlayerESP)
 
 local lastPlayerUpdate = 0
 RunService.Heartbeat:Connect(function()
-    if not ESPSettings.Enabled then return end
-    
+    if not ESPSettings.Enabled then return end    
     local now = os.clock()
     if now - lastPlayerUpdate < (ESPSettings.RefreshRateMS / 1000) then return end
     lastPlayerUpdate = now
@@ -808,12 +1442,12 @@ mainTab:Slider("Max Distance", {
 }, function(value)
     ESPSettings.MaxDistance = math.floor(value / 0.28)
 end)
+
 ---------------------------------------------------------
 -- TAB 2: MODIFICATIONS (Vehicles)
 ---------------------------------------------------------
 modTab:Section('--- Vehicle Mods ---')
 
---Inf Nitro
 modTab:Toggle('Inf. Nitro', {
     location = flags, 
     flag = "infGas"
@@ -842,7 +1476,6 @@ task.spawn(function()
     end
 end)
 
---HoverMode
 modTab:Toggle("Hover Mode", {
     location = flags,
     flag = "hoverMode"
@@ -882,10 +1515,6 @@ modTab:Button('Super Flyer', function()
             Settings.RotLerp = 0.075
             Settings.DriftVelLerp = 0.05
             Settings.DriftRotLerp = 0.1
-            Settings.Missiles = true
-            Settings.MissileCooldown = 0
-            Settings.MissileLock = 1
-            Settings.MissileTargetLock = 600
             Settings.HideCharacter = true
             Settings.CameraOffset = 26
         end
@@ -919,57 +1548,187 @@ end)
 ---------------------------------------------------------
 -- TAB 3: TELEPORTS
 ---------------------------------------------------------
+teleportTab:Section('--- Teleport Method ---')
+
+teleportTab:Dropdown('Method', {
+    location = flags,
+    flag = 'tpMethod',
+    list = {
+        "Normal",
+        "Respawn",
+        "Seat Persist",
+    }
+})
+
+local function tpNormal(targetCFrame)
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChild("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not (hum and hrp) then return false end
+
+    if hum.Sit and hum.SeatPart then
+        pcall(function() hum.SeatPart:Sit(nil) end)
+        hum.Sit = false
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        task.wait(0.15)
+    end
+
+    for i = 1, 5 do
+        hrp.CFrame = targetCFrame
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.Velocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        hrp.RotVelocity = Vector3.zero
+        task.wait(0.03)
+    end
+    return true
+end
+
+local function tpRespawn(targetCFrame)
+    local TARGET_POSITION = targetCFrame.Position
+    local TELEPORT_COUNT = 10
+    local TELEPORT_DELAY = 0.05
+    local hasTeleported = false
+
+    local connection
+    connection = LocalPlayer.CharacterAdded:Connect(function(character)
+        if not hasTeleported then
+            hasTeleported = true
+            if connection then
+                connection:Disconnect()
+            end
+            
+            local rootPart = character:WaitForChild("HumanoidRootPart")
+            startVelocityLock(0.8)
+            for i = 1, TELEPORT_COUNT do
+                rootPart.CFrame = CFrame.new(TARGET_POSITION)
+                rootPart.AssemblyLinearVelocity = Vector3.zero
+                rootPart.Velocity = Vector3.zero
+                rootPart.AssemblyAngularVelocity = Vector3.zero
+                rootPart.RotVelocity = Vector3.zero
+                task.wait(TELEPORT_DELAY)
+            end
+            startVelocityLock(0.4)
+        end
+    end)
+
+    task.spawn(function()
+        local teamName = LocalPlayer.Team and LocalPlayer.Team.Name or ""
+        local Event = ReplicatedStorage:FindFirstChild("RemoteFunction")
+
+        if Event then
+            if teamName == "Criminals" then
+                Event:InvokeServer("SetTeam", "Prisoners")
+            elseif teamName == "Heroes" then
+                Event:InvokeServer("SetTeam", "Heroes")
+            elseif teamName == "Police" then
+                Event:InvokeServer("SetTeam", "Police")
+            elseif teamName == "Prisoners" then
+                Event:InvokeServer("SetTeam", "Prisoners")
+            else
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum.Health = 0
+                end
+            end
+        end
+    end)
+
+    return true
+end
+
+local function tpSeatPersist(targetCFrame)
+    return executeSeatPersistTeleport(targetCFrame.Position)
+end
+
+local function doTeleportWithMethod(method, targetCFrame)
+    method = method or "Normal"
+    startVelocityLock(0.5)
+    local result
+    if method == "Seat Persist" then
+        result = tpSeatPersist(targetCFrame)
+    elseif method == "Respawn" then
+        result = tpRespawn(targetCFrame)
+    else
+        result = tpNormal(targetCFrame)
+    end
+    startVelocityLock(0.5)
+    return result
+end
+
 teleportTab:Section('--- Place Teleports ---')
 
 local teleportLocations = {
-    ["Prison In"] = {cframe = CFrame.new(-1053, 53, -3065), useVeh = false},
-    ["Prison Out"] = {cframe = CFrame.new(-890, 54, -2633), useVeh = false},
-    ["Police Station"] = {cframe = CFrame.new(-962, 53, -2945), useVeh = false},
-    ["Volcan"] = {cframe = CFrame.new(-1544, 345, 1599), useVeh = false},
-    ["Criminal Base"] = {cframe = CFrame.new(2138, 26, 373), useVeh = false},
-    ["Gun Shop"] = {cframe = CFrame.new(-1614, 43, 687), useVeh = false},
-    
-    ["Bank Out"] = {cframe = CFrame.new(733, 26, 441), useVeh = false},
-    ["Bank In (Heist)"] = {cframe = CFrame.new(679.78, 84.22, 583.71), useVeh = true},
-    
-    ["Jewelry Out"] = {cframe = CFrame.new(-217, 112, 759), useVeh = false},
-    ["Jewelry In (Heist)"] = {cframe = CFrame.new(-95.46, 25.63, 796.85), useVeh = true},
-    
-    ["Casino Out"] = {cframe = CFrame.new(1789, 26, 688), useVeh = false},
-    ["Casino In (Heist)"] = {cframe = CFrame.new(1695.86, 40.82, 496.46), useVeh = true},
-    
-    ["Club Out"] = {cframe = CFrame.new(1285, 26, 40), useVeh = false},
-    ["Club In (Heist)"] = {cframe = CFrame.new(1327.10, 145.42, -124.89), useVeh = true},
-    
-    ["Pyramid In (Heist)"] = {cframe = CFrame.new(1001.85, 51072.70, 537.93), useVeh = true}
+    ["In Prison"] = CFrame.new(-1048.11, 53.67, -3085.44),
+    ["Outside Prison"] = CFrame.new(-890.40, 53.57, -2671.90),
+    ["Inside Police Station"] = CFrame.new(-962.43, 53.47, -2955.52),
+    ["Airport"] = CFrame.new(-2114.43, 29.84, -1155.65),
+    ["Gun Store"] = CFrame.new(-1641.56, 43.18, 686.17),
+    ["Hero Base"] = CFrame.new(-1753.00, 76.08, 1604.66),
+    ["In Crime Base"] = CFrame.new(2138.39, 25.69, 376.61),
+    ["Outside Crime Base"] = CFrame.new(2082.39, 25.66, 356.27),
+    ["Inside Casino"] = CFrame.new(1682.04, 30.28, 486.17),
+    ["Outside Casino"] = CFrame.new(1788.61, 26.10, 685.85),
+    ["Inside Club"] = CFrame.new(1350.60, 144.56, -51.54),
+    ["Outside Club"] = CFrame.new(1285.22, 25.78, 35.10),
+    ["Inside Bank"] = CFrame.new(675.95, 1.46, 503.81),
+    ["Outside Bank"] = CFrame.new(697.15, 25.84, 441.46),
+    ["Inside Jewelery"] = CFrame.new(-210.46, 25.11, 758.74),
+    ["Outside Jewelery"] = CFrame.new(-209.48, 24.89, 719.63),
+    ["Vehicle Shop"] = CFrame.new(215.34, 26.00, -586.76),
+    ["Outside House 1"] = CFrame.new(1432.63, 37.24, -1236.28),
+    ["Inside House 1"] = CFrame.new(1410.82, 36.73, -1181.55),
+    ["Outside House 2"] = CFrame.new(1581.39, 25.51, 1577.70),
+    ["Inside House 2"] = CFrame.new(1601.85, 24.97, 1620.59),
+    ["Cluckdonalds"] = CFrame.new(1308.40, 24.73, 627.20),
+    ["Coffe Shop"] = CFrame.new(695.83, 36.18, -117.32)
 }
 
-local locationNames = {}
-for name, _ in pairs(teleportLocations) do
-    table.insert(locationNames, name)
-end
+local locationNames = {
+    "In Prison",
+    "Outside Prison",
+    "Inside Police Station",
+    "Airport",
+    "Gun Store",
+    "Hero Base",
+    "In Crime Base",
+    "Outside Crime Base",
+    "Inside Casino",
+    "Outside Casino",
+    "Inside Club",
+    "Outside Club",
+    "Inside Bank",
+    "Outside Bank",
+    "Inside Jewelery",
+    "Outside Jewelery",
+    "Vehicle Shop",
+    "Outside House 1",
+    "Inside House 1",
+    "Outside House 2",
+    "Inside House 2",
+    "Cluckdonalds",
+    "Coffe Shop"
+}
 
 teleportTab:Dropdown('Select Location', {
     location = flags,
-    flag = 'selectedTeleport', 
+    flag = 'selectedTeleport',
     list = locationNames
 })
 
 teleportTab:Button('Teleport', function()
-    local character = LocalPlayer.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
     local targetLocation = flags.selectedTeleport
-    
-    if hrp and targetLocation and teleportLocations[targetLocation] then
-        local tpData = teleportLocations[targetLocation]
-        if tpData.useVeh then
-            task.spawn(function()
-                vehicleTeleport(tpData.cframe)
-            end)
-        else
-            hrp.CFrame = tpData.cframe
-        end
+    if not targetLocation or not teleportLocations[targetLocation] then
+        return
     end
+
+    local method = flags.tpMethod or "Normal"
+    local targetCFrame = teleportLocations[targetLocation]
+
+    task.spawn(function()
+        doTeleportWithMethod(method, targetCFrame)
+    end)
 end)
 
 teleportTab:Section('--- TP 2 Player ---')
@@ -990,7 +1749,7 @@ local reloadPlayers, playerBox = teleportTab:SearchBox('Player Name...', {
 playerBox.FocusLost:Connect(function()
     local currentText = playerBox.Text:lower()
     if currentText == "" then return end
-    
+
     for _, name in ipairs(playerNames) do
         if name:lower():sub(1, #currentText) == currentText then
             playerBox.Text = name
@@ -1015,42 +1774,33 @@ Players.PlayerRemoving:Connect(function(p)
     reloadPlayers(playerNames)
 end)
 
-teleportTab:Toggle('Use Vehicle Bypass', {
-    location = flags,
-    flag = 'tpPlayerUseVehicle'
-})
-
 teleportTab:Button('Teleport to Player', function()
     local targetInput = flags.tpPlayerName
     if not targetInput or targetInput == "" then return end
-    
+
     local targetPlayer = nil
     local targetInputLower = targetInput:lower()
-    
+
     for _, p in pairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
-            if p.Name:lower():sub(1, #targetInputLower) == targetInputLower or p.DisplayName:lower():sub(1, #targetInputLower) == targetInputLower then
+            if p.Name:lower():sub(1, #targetInputLower) == targetInputLower
+                or p.DisplayName:lower():sub(1, #targetInputLower) == targetInputLower then
                 targetPlayer = p
                 break
             end
         end
     end
-    
-    if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
-        local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if myHrp then
-            local targetCFrame = targetPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, 3)
-            if flags.tpPlayerUseVehicle then
-                Notify("Verwende Vehicle TP zu <Color=Cyan>" .. targetPlayer.Name .. "<Color=/>...", 2)
-                task.spawn(function()
-                    vehicleTeleport(targetCFrame)
-                end)
-            else
-                myHrp.CFrame = targetCFrame
-                Notify("Teleported to <Color=Cyan>" .. targetPlayer.Name .. "<Color=/>", 2)
-            end
-        end
+
+    if not (targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")) then
+        return
     end
+
+    local method = flags.tpMethod or "Normal"
+    local targetCFrame = targetPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, 3)
+
+    task.spawn(function()
+        doTeleportWithMethod(method, targetCFrame)
+    end)
 end)
 
 ---------------------------------------------------------
@@ -1113,10 +1863,7 @@ end)
 miscTab:Section('--- Utilities ---')
 
 miscTab:Button('Give EmotePack', function()
-    local gamepasses = {
-        1998633357
-    }
-
+    local gamepasses = {1998633357}
     local added = false
     for _, v in pairs(gamepasses) do
         if not LocalPlayer:FindFirstChild(tostring(v)) then
@@ -1126,13 +1873,12 @@ miscTab:Button('Give EmotePack', function()
             added = true
         end
     end
-
     if added then
         Notify("Emote pack has been given!", 2)
     end
 end)
 
-miscTab:Button('Get in Any Vehicle', function()
+miscTab:Button('Enter Nearest Vehicle', function()
     local character = LocalPlayer.Character
     local hrp = character and character:FindFirstChild("HumanoidRootPart")
     local objectSelection = Workspace:FindFirstChild("ObjectSelection")
@@ -1163,49 +1909,688 @@ end)
 
 miscTab:Button('Remove all Lasers', function()
     local laserNames = {
-        ["Lasers"] = true,
-        ["SpinLaser"] = true,
-        ["SpinLaser1"] = true,
-        ["SpinLaser2"] = true,
-        ["SpinLaser3"] = true,
-        ["LaserLights"] = true,
-        ["Lasers Club"] = true,
-        ["SlideLaser"] = true
+        ["Lasers"] = true, ["SpinLaser"] = true, ["SpinLaser1"] = true,
+        ["SpinLaser2"] = true, ["SpinLaser3"] = true, ["LaserLights"] = true,
+        ["Lasers Club"] = true, ["SlideLaser"] = true
     }
-
-    local found = false
     for _, obj in pairs(workspace:GetDescendants()) do
         if laserNames[obj.Name] then
             obj:Destroy()
-            found = true
         end
-    end
-    
-    if not found then
-        Notify("No Lasers found", 0.8)
-    else
-        Notify("All lasers removed", 0.8)
     end
 end)
 
 miscTab:Button('Remove all doors', function()
-    local found = false
     for _, obj in pairs(workspace:GetDescendants()) do
         if obj.Name == "DoubleDoor" or obj.Name == "DoubleKeyDoor" or obj.Name == "CrimGate" or obj.Name == "CrimBaseGarage" or obj.Name == "Gate1" or obj.Name == "Gate2" or obj.Name == "DirectEscape" or obj.Name == "RevolvingDoor" or obj.Name == "PrisonGate1" or obj.Name == "PrisonGate2" then
             obj:Destroy()
-            found = true
         end
     end
-    
-    if not found then
-        Notify("No Doors found", 0.8)
-    else
-        Notify("All doors deleted", 0.8)
+end)
+
+miscTab:Button('Remove Ferris Wheel', function()
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if obj.Name == "FerrisWheel" then
+            obj:Destroy()
+        end
     end
 end)
 
 ---------------------------------------------------------
--- TOGGLE & SLIDE ANIMATION
+-- TAB 5: TROLLING
+---------------------------------------------------------
+trollingTab:Section('--- Vehicle Trolling ---')
+
+local isCarCollectorRunning = false
+local autoHornEnabled = false
+local autoDriftEnabled = false
+
+local function isSwatCar(car)
+    local settingsModule = car:FindFirstChild("Settings")
+    if settingsModule then
+        if string.find(string.upper(settingsModule.Name), "SWAT") or string.find(string.upper(car.Name), "SWAT") then
+            return true
+        end
+
+        if settingsModule:IsA("ModuleScript") then
+            local success, settingsData = pcall(function()
+                return require(settingsModule)
+            end)
+
+            if success then
+                if type(settingsData) == "table" then
+                    for key, value in pairs(settingsData) do
+                        if string.find(string.upper(tostring(key)), "SWAT") or string.find(string.upper(tostring(value)), "SWAT") then
+                            return true
+                        end
+                    end
+                elseif type(settingsData) == "string" and string.find(string.upper(settingsData), "SWAT") then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function findNextCar(objectSelection, startPosition, processedCars)
+    for _, obj in ipairs(objectSelection:GetChildren()) do
+        if not processedCars[obj] and isCarCollectorRunning then
+            if isSwatCar(obj) then
+                processedCars[obj] = true
+            else
+                local driveSeat = obj:FindFirstChild("DriveSeat")
+                if driveSeat and driveSeat:IsA("VehicleSeat") then
+                    if driveSeat.Occupant == nil then
+                        local distance = (driveSeat.Position - startPosition).Magnitude
+                        if distance > 30 then
+                            return obj, driveSeat
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function startCarCollection()
+    if isCarCollectorRunning then return end
+
+    local character = LocalPlayer.Character
+    local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+
+    isCarCollectorRunning = true
+    
+    local lockedStartCFrame = humanoidRootPart.CFrame
+    local lockedStartPosition = lockedStartCFrame.Position
+
+    task.spawn(function()
+        local processedCars = {}
+        local objectSelection = Workspace:WaitForChild("ObjectSelection", 5)
+        if not objectSelection then
+            isCarCollectorRunning = false
+            return
+        end
+
+        while isCarCollectorRunning do
+            local charNow = LocalPlayer.Character
+            local hrpNow = charNow and charNow:FindFirstChild("HumanoidRootPart")
+            local humNow = charNow and charNow:FindFirstChild("Humanoid")
+
+            if not (hrpNow and humNow) then
+                task.wait(1)
+                continue
+            end
+
+            local car, driveSeat = findNextCar(objectSelection, lockedStartPosition, processedCars)
+            
+            if not car or not isCarCollectorRunning then
+                break
+            end
+
+            processedCars[car] = true
+
+            if humNow and isCarCollectorRunning then
+                driveSeat:Sit(humNow)
+            end
+
+            task.wait(0.3)
+            if not isCarCollectorRunning then break end
+
+            local carChassis = car:FindFirstChild("CarChassis")
+            if carChassis then
+                local event = carChassis:FindFirstChild("Event")
+                if event and event:IsA("RemoteEvent") then
+                    pcall(function()
+                        event:FireServer("Horn", autoHornEnabled)
+                        event:FireServer("Drift", autoDriftEnabled)
+                    end)
+                end
+            end
+
+            if car:IsA("Model") then
+                car:PivotTo(lockedStartCFrame)
+            else
+                hrpNow.CFrame = lockedStartCFrame
+            end
+
+            task.wait(0.3)
+            if not isCarCollectorRunning then break end
+
+            if humNow then
+                humNow.Sit = false
+            end
+
+            task.wait(0.3)
+        end
+
+        isCarCollectorRunning = false
+    end)
+end
+
+trollingTab:Toggle('Auto Enable Horn', {location = flags, flag = "auto_enable_horn"}, function(state)
+    autoHornEnabled = state
+end)
+
+trollingTab:Toggle('Auto Enable Drift', {location = flags, flag = "auto_enable_drift"}, function(state)
+    autoDriftEnabled = state
+end)
+
+trollingTab:Button('Start Bring All Vehicles', function()
+    if not isCarCollectorRunning then
+        startCarCollection()
+    end
+end)
+
+trollingTab:Button('Stop Bring All Vehicles', function()
+    isCarCollectorRunning = false
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChild("Humanoid")
+    if humanoid then
+        humanoid.Sit = false
+    end
+end)
+
+local function ensureShotgun()
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local character = LocalPlayer.Character
+    
+    local hasShotgun = (backpack and backpack:FindFirstChild("Shotgun")) or (character and character:FindFirstChild("Shotgun"))
+    
+    if not hasShotgun then
+        local shotgunCoords = Vector3.new(-1652.53, 42.97, 709.05)
+        selectWeapon("Shotgun", shotgunCoords, "Shotgun")
+        task.wait(0.5)
+    end
+end
+
+local Event = ReplicatedStorage:WaitForChild("Event")
+
+local function processOtherVehicles()
+    ensureShotgun()
+    local objSel = workspace:FindFirstChild("ObjectSelection")
+    if not objSel then return end
+    for _, child in ipairs(objSel:GetChildren()) do
+        local vehicleType = child:FindFirstChild("VehicleType")
+        if vehicleType and vehicleType:IsA("ValueBase") then
+            local vValue = vehicleType.Value
+            if vValue ~= "Plane" and vValue ~= "Helicopter" then
+                for _, part in ipairs(child:GetChildren()) do
+                    if string.match(part.Name, "Wheel") then
+                        for i = 1, 6 do
+                            Event:FireServer("sZ4tk", part)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function processAirVehicles()
+    ensureShotgun()
+    local objSel = workspace:FindFirstChild("ObjectSelection")
+    if not objSel then return end
+    for _, child in ipairs(objSel:GetChildren()) do
+        local vehicleType = child:FindFirstChild("VehicleType")
+        if vehicleType and vehicleType:IsA("ValueBase") then
+            if vehicleType.Value == "Helicopter" or vehicleType.Value == "Plane" then
+                local bodyPart = child:FindFirstChild("Body") and child.Body:FindFirstChild("Body")
+                if bodyPart then
+                    for i = 1, 6 do
+                        Event:FireServer("sZ4tk", bodyPart)
+                    end
+                end
+            end
+        end
+    end
+end
+
+trollingTab:Button('Pop all Tires', function()
+    processOtherVehicles()
+end)
+
+local loopPopTiresActive = false
+trollingTab:Toggle('Loop Pop all Tires', {location = flags, flag = "loop_pop_tires"}, function(state)
+    loopPopTiresActive = state
+    task.spawn(function()
+        while loopPopTiresActive do
+            processOtherVehicles()
+            task.wait(10.5)
+        end
+    end)
+end)
+
+trollingTab:Button('Disable all Air Vehicles', function()
+    processAirVehicles()
+end)
+
+local loopDisableAirActive = false
+trollingTab:Toggle('Loop Disable Air Vehicles', {location = flags, flag = "loop_disable_air"}, function(state)
+    loopDisableAirActive = state
+    task.spawn(function()
+        while loopDisableAirActive do
+            processAirVehicles()
+            task.wait(8)
+        end
+    end)
+end)
+
+---------------------------------------------------------
+-- KILL PLAYER & KILL ALL (Kill All durchläuft alle, Heli-Rückgabe/Rückteleport erst ganz am Ende)
+---------------------------------------------------------
+trollingTab:Section('--- Player Trolling ---')
+
+local FIXED_HELI_RETURN_CFRAME = CFrame.new(-4255.49, 38.73, -3878.23)
+
+local trollPlayerNames = {}
+for _, v in pairs(Players:GetPlayers()) do
+    if v ~= LocalPlayer then
+        table.insert(trollPlayerNames, v.Name)
+    end
+end
+
+local reloadTrollPlayers, trollPlayerBox = trollingTab:SearchBox('Player Name...', {
+    location = flags,
+    flag = 'trollPlayerName',
+    list = trollPlayerNames
+})
+
+trollPlayerBox.FocusLost:Connect(function()
+    local currentText = trollPlayerBox.Text:lower()
+    if currentText == "" then return end
+
+    for _, name in ipairs(trollPlayerNames) do
+        if name:lower():sub(1, #currentText) == currentText then
+            trollPlayerBox.Text = name
+            flags.trollPlayerName = name
+            break
+        end
+    end
+end)
+
+Players.PlayerAdded:Connect(function(p)
+    if p ~= LocalPlayer then
+        table.insert(trollPlayerNames, p.Name)
+        reloadTrollPlayers(trollPlayerNames)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+    for i, name in ipairs(trollPlayerNames) do
+        if name == p.Name then
+            table.remove(trollPlayerNames, i)
+            break
+        end
+    end
+    reloadTrollPlayers(trollPlayerNames)
+end)
+
+local function hasMissileHelicopterSettings(model)
+    local settings = model:FindFirstChild("Settings")
+    if settings and settings:IsA("ModuleScript") then
+        local success, data = pcall(function()
+            return require(settings)
+        end)
+        if success and type(data) == "table" and data.Missiles == true then
+            return true
+        end
+    end
+    return false
+end
+
+local function getSuitableHelicopter()
+    local objectSelection = Workspace:FindFirstChild("ObjectSelection")
+    if not objectSelection then return nil end
+
+    for _, model in ipairs(objectSelection:GetChildren()) do
+        if hasMissileHelicopterSettings(model) then
+            local seat = model:FindFirstChild("DriveSeat", true) or model:FindFirstChildWhichIsA("VehicleSeat", true)
+            if seat then
+                return model, seat
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function executeKillOnTarget(targetPlayer, isBatchMode)
+    if not (targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")) then
+        return
+    end
+
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChild("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not (char and hum and hrp) then return end
+
+    local originalCFrame = hrp.CFrame
+
+    local currentSeat = hum.SeatPart
+    local currentHeli = nil
+    local hadHeliBefore = false
+    local initialHeliCFrame = nil
+
+    if currentSeat then
+        local model = currentSeat.Parent
+        while model and not model:IsA("Model") do model = model.Parent end
+        if model and hasMissileHelicopterSettings(model) then
+            currentHeli = model
+            hadHeliBefore = true
+            initialHeliCFrame = currentHeli:GetPivot()
+        else
+            hum.Sit = false
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+            task.wait(1.0)
+        end
+    end
+
+    if not currentHeli then
+        local heliModel, seat = getSuitableHelicopter()
+        if not heliModel or not seat then
+            Notify("<Color=Red>Kein passender Heli mit Missiles=true gefunden!</Color>", 2)
+            return
+        end
+        
+        currentHeli = heliModel
+        hadHeliBefore = false
+        
+        startFlagLoop()
+        S.holding = true
+
+        seat:Sit(hum)
+        local t = 0
+        while hum.SeatPart ~= seat and t < 3 do
+            task.wait(0.1)
+            t = t + 0.1
+        end
+        task.wait(1.0)
+
+        local targetHrp = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not targetHrp then stopFlagLoop() return end
+        
+        local targetPos = targetHrp.Position
+        local attackCFrame = CFrame.new(targetPos.X, targetPos.Y + 300, targetPos.Z)
+
+        currentHeli:PivotTo(attackCFrame)
+        startVelocityLock(0.5)
+        task.wait(1.0)
+
+        for i = 1, 8 do
+            if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                targetPos = targetPlayer.Character.HumanoidRootPart.Position
+                currentHeli:PivotTo(CFrame.new(targetPos.X, targetPos.Y + 300, targetPos.Z))
+            end
+            Event:FireServer("bX2mc", Vector3.new(targetPos.X, targetPos.Y, targetPos.Z))
+            task.wait(0.05)
+        end
+
+        -- Nur zurückbringen/teleportieren, wenn es kein Batch-Modus (Kill All) ist
+        if not isBatchMode then
+            currentHeli:PivotTo(FIXED_HELI_RETURN_CFRAME)
+            startVelocityLock(0.5)
+            task.wait(1.0)
+
+            startVelocityLock(0.6)
+            for i = 1, 5 do
+                hrp.CFrame = originalCFrame
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.Velocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+                hrp.RotVelocity = Vector3.zero
+                task.wait(0.03)
+            end
+            startVelocityLock(0.4)
+
+            stopFlagLoop()
+
+            hum.Sit = false
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+            task.wait(1.0)
+
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+            task.wait(1.0)
+        else
+            stopFlagLoop()
+        end
+        return
+    end
+
+    -- Wenn der Spieler schon im Heli saß
+    local targetHrp = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetHrp then return end
+
+    local targetPos = targetHrp.Position
+    local attackCFrame = CFrame.new(targetPos.X, targetPos.Y + 300, targetPos.Z)
+
+    currentHeli:PivotTo(attackCFrame)
+    startVelocityLock(0.5)
+    task.wait(1.0)
+
+    for i = 1, 8 do
+        if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            targetPos = targetPlayer.Character.HumanoidRootPart.Position
+            currentHeli:PivotTo(CFrame.new(targetPos.X, targetPos.Y + 300, targetPos.Z))
+        end
+        Event:FireServer("bX2mc", Vector3.new(targetPos.X, targetPos.Y, targetPos.Z))
+        task.wait(0.05)
+    end
+
+    if not isBatchMode then
+        if initialHeliCFrame then
+            currentHeli:PivotTo(initialHeliCFrame)
+        end
+        startVelocityLock(0.5)
+        task.wait(1.0)
+    end
+end
+
+trollingTab:Button('Kill', function()
+    local targetInput = flags.trollPlayerName
+    if not targetInput or targetInput == "" then return end
+
+    local targetPlayer = nil
+    local targetInputLower = targetInput:lower()
+
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            if p.Name:lower():sub(1, #targetInputLower) == targetInputLower
+                or p.DisplayName:lower():sub(1, #targetInputLower) == targetInputLower then
+                targetPlayer = p
+                break
+            end
+        end
+    end
+
+    if targetPlayer then
+        task.spawn(function()
+            executeKillOnTarget(targetPlayer, false)
+        end)
+    end
+end)
+
+trollingTab:Button('Kill All', function()
+    task.spawn(function()
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        
+        local originalCFrame = hrp.CFrame
+        local currentSeat = char:FindFirstChild("Humanoid") and char.Humanoid.SeatPart
+        local hadHeliBefore = false
+        local initialHeliCFrame = nil
+        local currentHeli = nil
+
+        if currentSeat then
+            local model = currentSeat.Parent
+            while model and not model:IsA("Model") do model = model.Parent end
+            if model and hasMissileHelicopterSettings(model) then
+                currentHeli = model
+                hadHeliBefore = true
+                initialHeliCFrame = currentHeli:GetPivot()
+            end
+        end
+
+        -- 1. Alle Spieler nacheinander abarbeiten (ohne Zwischentransport)
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                executeKillOnTarget(p, true)
+                task.wait(0.2)
+            end
+        end
+
+        -- 2. ERST GANZ AM ENDE: Heli zurückbringen & Spieler zurückteleportieren
+        local activeHeli, _ = getSuitableHelicopter()
+        if activeHeli then
+            if not hadHeliBefore then
+                activeHeli:PivotTo(FIXED_HELI_RETURN_CFRAME)
+            else
+                if initialHeliCFrame then
+                    activeHeli:PivotTo(initialHeliCFrame)
+                end
+            end
+        end
+
+        startVelocityLock(0.5)
+        task.wait(0.5)
+
+        startVelocityLock(0.6)
+        for i = 1, 5 do
+            hrp.CFrame = originalCFrame
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.Velocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            hrp.RotVelocity = Vector3.zero
+            task.wait(0.03)
+        end
+        startVelocityLock(0.4)
+
+        stopFlagLoop()
+
+        local hum = char and char:FindFirstChild("Humanoid")
+        if hum then
+            hum.Sit = false
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+            task.wait(1.0)
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+        end
+    end)
+end)
+
+---------------------------------------------------------
+-- TAB 6: FARMING
+---------------------------------------------------------
+farmingTab:Section('--- Exp Farm ---')
+
+local TARGET_EXP_POS = Vector3.new(-1025.13, 53.08, -3242.94)
+local scriptRunning = false
+
+local function executeNormalTeleport(targetPos)
+    local char = LocalPlayer.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.new(targetPos)
+        startVelocityLock(0.5)
+    end
+end
+
+local function getClosestModelsByName(targetName, count)
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local objectSelection = Workspace:FindFirstChild("ObjectSelection")
+    if not hrp or not objectSelection then return {} end
+
+    local list = {}
+    for _, child in ipairs(objectSelection:GetChildren()) do
+        if child.Name == targetName then
+            local pos = child:GetPivot().Position
+            local dist = (hrp.Position - pos).Magnitude
+            table.insert(list, {model = child, dist = dist})
+        end
+    end
+
+    table.sort(list, function(a, b) return a.dist < b.dist end)
+
+    local result = {}
+    for i = 1, math.min(count, #list) do
+        table.insert(result, list[i].model)
+    end
+    return result
+end
+
+local function fireAllEventsSimultaneously()
+    local targetsToFind = {"BenchPress", "Treadmill", "Pullups"}
+    local eventsToFire = {}
+
+    for _, name in ipairs(targetsToFind) do
+        local models = getClosestModelsByName(name, 2)
+        for _, model in ipairs(models) do
+            local child1 = model:FindFirstChild(name)
+            if child1 then
+                local child2 = child1:FindFirstChild(name)
+                if child2 then
+                    local event = child2:FindFirstChild("Event")
+                    if event and event:IsA("RemoteEvent") then
+                        table.insert(eventsToFire, event)
+                    end
+                end
+            end
+        end
+    end
+
+    for _, event in ipairs(eventsToFire) do
+        task.spawn(function()
+            event:FireServer()
+        end)
+    end
+end
+
+local function startMainLoop()
+    task.spawn(function()
+        local ok = executeSeatPersistTeleport(TARGET_EXP_POS)
+        if not ok then
+            executeNormalTeleport(TARGET_EXP_POS)
+        end
+
+        task.wait(0.5)
+        local firstRun = true
+
+        while scriptRunning do
+            if not firstRun then
+                executeNormalTeleport(TARGET_EXP_POS)
+                task.wait(0.3)
+            end
+            firstRun = false
+
+            if not scriptRunning then break end
+
+            fireAllEventsSimultaneously()
+
+            local elapsedTime = 0
+            while elapsedTime < 5 and scriptRunning do
+                task.wait(0.1)
+                elapsedTime = elapsedTime + 0.1
+            end
+        end
+    end)
+end
+
+farmingTab:Toggle("Exp Farm", {
+    location = flags,
+    flag = "exp_farm_toggle"
+}, function(state)
+    scriptRunning = state
+    if scriptRunning then
+        startMainLoop()
+    else
+        stopFlagLoop()
+    end
+end)
+
+---------------------------------------------------------
+-- TOGGLE & SLIDE ANIMATION (RightAlt)
 ---------------------------------------------------------
 local toggleKey = Enum.KeyCode.RightAlt
 local toggled = true
